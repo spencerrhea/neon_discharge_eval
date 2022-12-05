@@ -49,7 +49,7 @@ library(lubridate)
 library(glue)
 
 # Set working directory 
-setwd('../timeseries_experimentation/neon_discharge_eval/')
+setwd('../macrosheds/timeseries_experimentation/neon_discharge_eval/')
 
 dir.create('data/data_in/neon',
            recursive = TRUE,
@@ -191,6 +191,7 @@ sites <- sites[nchar(sites) == 4]
 # Remove TOOK and add the two sub sites (THis is need thoughout becuase TOOK 
 # is the only NEON site with two stream gauges)
 sites <- sites[! grepl('TOOK', sites)]
+sites <- sites[! grepl('TOMB', sites)]
 sites <- c(sites, 'TKIN', 'TKOT') 
 
 # Get rating curve files
@@ -203,6 +204,7 @@ dir.create('plots/',
            showWarnings = FALSE)
 all_sites_curve <- tibble()
 all_sites_drift <- tibble()
+regression_dates <- tibble()
 for(i in 1:length(sites)) {
 
     # Site
@@ -244,6 +246,13 @@ for(i in 1:length(sites)) {
             select(-stationHorizontalID)
     }
 
+    #### Pull dates for regressionIDs 
+    site_regressions <- all_q %>%
+        group_by(regressionID) %>%
+        summarise(regression_start = min(endDate, na.rm = T),
+                  regression_end = max(endDate, na.rm = T))
+    
+    regression_dates <- rbind(regression_dates, site_regressions)
 
     #### Check continuous stage with manual measured stage height
     stage_verify <- full_join(all_q, all_manual_stage, by = 'endDate')
@@ -288,6 +297,7 @@ for(i in 1:length(sites)) {
     site_fil <- grep(site, all_ratings_fil, value = T)
     site_fil <- list.files(site_fil, full.names = T)
     site_fil <- grep('sdrc_resultsResiduals', site_fil, value = T)
+    site_fil <- grep('[.]csv', site_fil, value = T)
     
     all_rating_red <- suppressMessages(map_dfr(site_fil, read_csv))
     
@@ -327,19 +337,21 @@ for(i in 1:length(sites)) {
         start_date <- min(all_q_curve$endDate)
         end_date <- max(all_q_curve$endDate)
 
-        # R2 
+        # NSE
         year_curve <- all_rating_red %>%
             filter(curveID == curves[p])
 
         residual <- year_curve$Y1residual
         simulated <- year_curve$Y1simulated
-        R.squared = 1 - sum((residual)^2)/sum((simulated-mean(simulated))^2)
+        observed <- year_curve$Y1observed
+        R.squared = 1 - sum((residual)^2)/sum((observed-mean(observed))^2)
+        NSE <- hydroGOF::NSE(simulated, observed)
 
         gaugings_n <- nrow(year_curve)
 
         # Data outside range 
-        max_q <- max(year_curve$Y1unbiased, na.rm = T)
-        min_q <- min(year_curve$Y1unbiased, na.rm = T)
+        max_q <- max(year_curve$Y1observed, na.rm = T)
+        min_q <- min(year_curve$Y1observed, na.rm = T)
 
         total_n <- all_q_curve %>%
             nrow()
@@ -357,6 +369,7 @@ for(i in 1:length(sites)) {
         # Put data into tib
         lit_tib <- tibble(curveID = curves[p],
                           r_squared = R.squared,
+                          NSE = NSE,
                           above_range = above_range,
                           under_range = under_range,
                           outside_range = outside_range,
@@ -375,9 +388,13 @@ for(i in 1:length(sites)) {
         mutate(site = str_split_fixed(curveID, '[.]', n = Inf)[,1],
                curve_year = str_split_fixed(curveID, '[.]', n = Inf)[,2],
                year = str_split_fixed(curve_year, '-', n = Inf)[,1]) %>%
-        mutate(curve_pass = case_when(r_squared >= 0.9 & outside_range <= 15 ~ 'Tier1',
-                                      (r_squared > 0.75 & r_squared < 0.9) | (outside_range <= 30 & outside_range > 15) ~ 'Tier2',
-                                      r_squared <= 0.75 | outside_range > 30 ~ 'Tier3'))
+        # TEST
+        mutate(curve_pass = case_when(NSE >= 0.9 & above_range <= 15 ~ 'Tier1',
+                                      (NSE > 0.75 & NSE < 0.9) | (above_range <= 30 & above_range > 15) ~ 'Tier2',
+                                      NSE <= 0.75 | above_range > 30 ~ 'Tier3'))
+        # mutate(curve_pass = case_when(NSE >= 0.9 & outside_range <= 15 ~ 'Tier1',
+        #                               (NSE > 0.75 & NSE < 0.9) | (outside_range <= 30 & outside_range > 15) ~ 'Tier2',
+        #                               NSE <= 0.75 | outside_range > 30 ~ 'Tier3'))
 
     all_sites_curve <- rbind(all_sites_curve, all_curves_fin)
 
@@ -502,10 +519,10 @@ pdftools::pdf_combine(list.files('plots/', full.names = T), 'data/all_neon_q_eva
 # Final tables 
 final_curves <- all_sites_curve %>%
     mutate(year = as.numeric(year)) %>%
-    select(site, year, curveID, start_date, end_date, curve_pass, r_squared,
+    select(site, year, curveID, start_date, end_date, curve_pass, NSE,
            above_range, under_range, outside_range, cont_n, gaugings_n, curve_year)
 
-write_csv(final_curves, 'data/neon_rating_curve_qual.csv')
+write_csv(final_curves, 'data/neon_rating_curve_qual_v2.csv')
 
 
 
@@ -513,7 +530,7 @@ final_drift <- all_sites_drift %>%
     select(site, year, month, drift_status, n, mean_dif, outside_uncert,
            mean_uncertaintiy, prop_outside)
 
-write_csv(final_drift, 'data/drift_detect.csv')
+write_csv(final_drift, 'data/drift_detect_v2.csv')
 
 #### Regression check 
 
@@ -525,14 +542,18 @@ neon_reg_fils <- list.files('data/data_in/neon/NEON_discharge-continuous/',
 rel_file <- grep('gaugePressureRelationship', 
                  neon_reg_fils, value = TRUE)
 
-all_reg <- map_dfr(rel_file, read.csv)
+all_reg <- map_dfr(rel_file, read.csv) %>%
+    left_join(regression_dates) %>%
+    select(-startDate, -endDate) %>%
+    rename(startDate = regression_start,
+           endDate = regression_end)
 
 # initialize loop outputs and inputs
 curve_ids <- unique(all_reg$regressionID)
 out_reg <- tibble(site = NA, regressionID = curve_ids, startDate = ymd_hm("1999-09-09T09:09Z"), 
                   endDate = ymd_hm("1999-09-09T09:09Z"), n = NA,
                   rSquared = NA, resid_normal = NA, date_sig = NA, date_slope = NA,
-                  error = NA)
+                  error = NA, NSE = NA)
 
 # begin loop
 #i = 1
@@ -540,9 +561,7 @@ for(i in 1:nrow(out_reg)){
     
     # filter data by regressionID
     df_reg <- all_reg %>%
-        filter(regressionID == curve_ids[i]) %>%
-        mutate(startDate = ymd_hms(startDate),
-               endDate = ymd_hms(endDate))
+        filter(regressionID == curve_ids[i]) 
     
     # assign curve info
     out_reg$site[i] <- df_reg$siteID[1]
@@ -551,7 +570,7 @@ for(i in 1:nrow(out_reg)){
     out_reg$endDate[i] <- max(df_reg$endDate)
     out_reg$n[i] <- nrow(df_reg)
     
-    if(nrow(df_reg)<=2){
+    if(nrow(df_reg) <= 2){
 
         out_reg$error[i] <- paste(df_reg$regressionID[1],'only has',nrow(df_reg),'observations.')
 
@@ -559,14 +578,18 @@ for(i in 1:nrow(out_reg)){
 
         # test regression
         fit_reg <- summary(lm(calibratedPressMean~gaugeHeight, data = df_reg))
+        fit_reg <- summary(lm(calculatedStage~gaugeHeight, data = df_reg))
+        stage_NSE <- hydroGOF::NSE(df_reg$calculatedStage, df_reg$gaugeHeight)
+        stage_R.squared = 1 - sum((df_reg$calculatedStage-df_reg$gaugeHeight)^2, na.rm = T)/sum((df_reg$gaugeHeight-mean(df_reg$gaugeHeight))^2, na.rm = TRUE)
+        out_reg$NSE[i] <- stage_NSE
 
-        if(fit_reg[['coefficients']][2,1] == 0){
+        if(is.na(stage_NSE)){
             
             out_reg$error[i] <- paste('Regression has slope of 0.')
             
         } else{
             
-            out_reg$rSquared[i] <- fit_reg$r.squared
+            out_reg$rSquared[i] <- stage_R.squared
             sh_test <- try(shapiro.test(residuals(fit_reg))$p.value)
             if(sh_test[1] == "Error in shapiro.test(residuals(fit_reg)) : all 'x' values are identical\n"){
                 out_reg$resid_normal[i] <- 1
@@ -574,14 +597,12 @@ for(i in 1:nrow(out_reg)){
                 out_reg$resid_normal[i] <- sh_test
             }
             
-            
-            
-            
             # test date effect
-            fit_int <- summary(lm(calibratedPressMean~gaugeHeight:startDate+gaugeHeight, data=df_reg))
-            # fit_int <- summary(lm(calculatedStage~calibratedPressMean+startDate, data=df_reg))
-            out_reg$date_sig[i] <- fit_int[['coefficients']][3,4]
-            out_reg$date_slope[i] <- fit_int[['coefficients']][3,1]
+            # fit_int <- summary(lm(calibratedPressMean~gaugeHeight:startDate+gaugeHeight, data=df_reg))
+            # fit_int <- summary(lm(calculatedStage~gaugeHeight:startDate+gaugeHeight, data=df_reg))
+            # # fit_int <- summary(lm(calculatedStage~calibratedPressMean+startDate, data=df_reg))
+            # out_reg$date_sig[i] <- fit_int[['coefficients']][3,4]
+            # out_reg$date_slope[i] <- fit_int[['coefficients']][3,1]
             
         }
     }
@@ -589,12 +610,13 @@ for(i in 1:nrow(out_reg)){
 
 # Classify regressions 
 presure_gauge_relation <- out_reg %>%
-    select(site, regressionID, start_date = startDate, end_date=endDate, r_squared=rSquared) %>%
+    select(site, regressionID, start_date = startDate, end_date=endDate, r_squared=rSquared,
+           NSE) %>%
     mutate(regesstion_status = case_when(r_squared >= 0.9 ~ 'good',
                                          r_squared >= 0.75 & r_squared < 0.9 ~ 'fair',
                                          r_squared < 0.75 ~ 'poor'))
 
-write_csv(presure_gauge_relation, 'data/regressions_eval.csv')
+write_csv(presure_gauge_relation, 'data/regressions_eval_v2.csv')
 
 #### Convert files to monthly time step ####
 
@@ -616,11 +638,12 @@ for(i in 1:nrow(presure_gauge_relation)){
 }
 
 regession_status <- presure_gauge_relation %>%
-    select(regressionID, regesstion_status, site, r_squared)
+    select(regressionID, regesstion_status, site, r_squared, NSE)
 
 reg_month_satus <- all_regestion_months %>%
     left_join(regession_status, by = 'regressionID') %>%
-    select(site, year, month, regesstion_status, regression_r_squared=r_squared)
+    select(site, year, month, regression_status = regesstion_status, regression_r_squared=r_squared, 
+           regressionID, regression_NSE = NSE)
 
 
 # prep rating curves
@@ -644,7 +667,7 @@ final_curves <- final_curves %>%
     select(-year)
 rating_curve_final <- left_join(all_ratings_tibble, final_curves, by = 'curveID') %>%
     select(year, month, site, curveID, rating_curve_status=curve_pass,
-           rating_curve_r_squared=r_squared, rating_curve_above_range=above_range, 
+           rating_curve_NSE=NSE, rating_curve_above_range=above_range, 
            rating_curve_under_range=under_range, rating_curve_outside_range=outside_range, 
            gaugings_n)
 
@@ -658,5 +681,5 @@ final_drift_prep <- final_drift %>%
 final_table <- full_join(rating_curve_final, reg_month_satus) %>%
     full_join(., final_drift_prep)
 
-write_csv(final_table, 'data/neon_q_eval_final.csv')
+write_csv(final_table, 'data/neon_q_eval_final_v2.csv')
 
