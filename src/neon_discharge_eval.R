@@ -1,17 +1,23 @@
+#### Analysis Information #### 
+# See Rhea et al., 2023 for more information on this analysis or the hydroshare repo 
+# connected to this analysis
+
+# Rhea et al., 2023: https://doi.org/10.1038/s41597-023-01983-w
+# Hydroshare: https://www.hydroshare.org/resource/1a388391632f4277992889e2de152163/
 
 # This script evaluates the NEON discharge data in three ways, first the rating 
 # curve is evaluated to determine if the data passes a set of criteria for use.
 # Site rating curves will fall into the following categories:
 # Tier 1
-    # Rating curve has an R2 of 0.9 or greater AND
+    # Rating curve has an NSE of 0.9 or greater AND
     # No more than 15 percent of the reported discharge values fall outside 
         # of the range of manual gauged measurements
 # Tier 2
-    # Rating curve has an R2 > 0.75 and R2 < 0.9 OR
+    # Rating curve has an NSE > 0.75 and NSE < 0.9 OR
     # No more than 30 percent of the reported discharge values fall outside 
         # of the range of manual gauged measurements 
 # Tier 3
-    # Rating curve has an R2 < 0.75 OR
+    # Rating curve has an NSE < 0.75 OR
     # 30 percent of the reported discharge values fall outside 
         # of the range of manual gauged measurements 
 
@@ -38,9 +44,11 @@
 # relationship between the continuous and manual stage height readings. We then 
 # classified each regression into the following categories: 
     # Good
-        # r-squared of 0.9 or higher 
-        # r-squared between 0.75 and 0.9
-        # r-squared of less than 0.75
+        # NSE of 0.9 or higher 
+    # Fair
+        # NSE between 0.75 and 0.9
+    # Poor
+        # NSE of less than 0.75
 
 #### Set up ####
 
@@ -48,14 +56,16 @@ library(tidyverse)
 library(lubridate)
 library(glue)
 
-# Set working directory 
-setwd('../macrosheds/timeseries_experimentation/neon_discharge_eval/')
+# Set the NEON release you would like to use. See ?neonUtilities::loadByProduct
+# For more information. This variable will be passed to the release argument of 
+# neonUtilities::loadByProduct
+neon_release <- 'RELEASE-2023'
 
 dir.create('data/data_in/neon',
            recursive = TRUE,
            showWarnings = FALSE)
 
-# Download data 
+#### Download data ####
 req = httr::GET(paste0("http://data.neonscience.org/api/v0/products/",
                        'DP4.00130.001'))
 txt = httr::content(req, as="text")
@@ -88,8 +98,11 @@ for(i in 1:length(neon_streams)){
                                                       site=site_code, 
                                                       startdate=avail_site_sets$component[j],
                                                       enddate=avail_site_sets$component[j],
-                                                      package='expanded', check.size=FALSE),
+                                                      package='expanded', check.size=FALSE,
+                                                      release = neon_release),
                          silent = TRUE)
+        
+        if(inherits(data_pile, 'try-error')) next
         
         folder_name <- glue('NEON.D##.{s}.DP4.00130.{c}.expanded',
                              s = site_code,
@@ -154,8 +167,13 @@ for(i in 1:length(neon_streams)){
                                                       site=site_code, 
                                                       startdate=avail_site_sets$component[j],
                                                       enddate=avail_site_sets$component[j],
-                                                      package='expanded', check.size=FALSE),
+                                                      package='expanded', check.size=FALSE,
+                                                      release = neon_release),
                          silent = TRUE)
+        
+        if(inherits(data_pile, 'try-error')){
+            next
+        }
         
         folder_name <- glue('NEON.D##.{s}.DP4.00133.{c}.expanded',
                             s = site_code,
@@ -180,6 +198,7 @@ for(i in 1:length(neon_streams)){
     }
 }
 
+
 # Identify relevant files
 neon_q_fils <- list.files('data/data_in/neon/NEON_discharge-continuous/',
                           full.names = T)
@@ -188,7 +207,7 @@ neon_q_fils <- list.files('data/data_in/neon/NEON_discharge-continuous/',
 sites <- unique(str_match(neon_q_fils, '[DP###\\.]([A-Z]{4})')[,2])
 sites <- sites[nchar(sites) == 4]
 
-# Remove TOOK and add the two sub sites (THis is need thoughout becuase TOOK 
+# Remove TOOK and add the two sub sites (This is need throughout because TOOK 
 # is the only NEON site with two stream gauges)
 sites <- sites[! grepl('TOOK', sites)]
 sites <- sites[! grepl('TOMB', sites)]
@@ -198,6 +217,7 @@ sites <- c(sites, 'TKIN', 'TKOT')
 all_ratings_fil <- list.files('data/data_in/neon/NEON_discharge-rating-curves/',
                               full.names = T)
 
+#### Apply classification ####
 # Loop reads in discharge and rating curve data for each sites, applies the various
 # tests, and plots the data with shading to indicate flagging
 dir.create('plots/',
@@ -624,6 +644,7 @@ write_csv(presure_gauge_relation, 'data/regressions_eval_v2.csv')
 all_regestion_months <- tibble()
 for(i in 1:nrow(presure_gauge_relation)){
     
+    if(is.na(presure_gauge_relation[[i,3]]) || is.na(presure_gauge_relation[[i,4]])) next
     all_dates <- seq.Date(as.Date(presure_gauge_relation[[i,3]]), as.Date(presure_gauge_relation[[i,4]]), by = 'day')
     
     month_years <- tibble(date = all_dates) %>%

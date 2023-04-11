@@ -1,9 +1,0 @@
-    -Make a map of data avlibility 
--Get amount of data avlible at sites 
-    -Make plot of good, medium, and bad in each catagory 
--Ask Nick about ushs rating curve (per matts comment)
-    -Flow chart on dot plot and make legend bigger
--Need usgs comparison plots 
--Start with amount of data in tier 1 at the onset 
--End with weather we see improvments on data
-    -Fix regestion start end times
